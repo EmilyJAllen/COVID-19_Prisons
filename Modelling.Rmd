@@ -1,0 +1,939 @@
+---
+title: "Modelling"
+author: "Emily Allendorf"
+date: "5/18/2021"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, echo = F, message=F, warning=FALSE}
+library(readr)
+library(rstanarm)
+library(dplyr)
+library(ggplot2)
+library(MLmetrics) # MSE function 
+library(MASS)
+library(loo) # Bayesian comparision function
+library(kableExtra)
+library(bayesplot)
+options(mc.cores = 2)
+library(projpred)
+set.seed(1)
+# multicore processing: https://discourse.mc-stan.org/t/correctly-setting-mc-cores-for-rstanarm-models/861
+```
+
+
+# Data Description
+
+I am modeling prison COVID data which comes from merging:
+
+> UCLA Law COVID data
+> CDCR weekly state prison capacity data
+> Daily Race & Gender demographic data
+
+```{r, message=F, warning=F}
+Prison <-read_csv("~/College/4th_Year/Stats_141XR/COVID_Prisons/Data/PrisonCovid.csv")
+```
+
+This data includes the following variables
+
+```{r}
+colnames(Prison)
+```
+And ranges from
+
+```{r}
+range(Prison$Date)
+```
+
+# Frequentist Modeling
+
+### Poisson Regression
+
+First I'm going to run a poisson regression using the glm package
+https://stats.idre.ucla.edu/r/dae/poisson-regression/
+
+```{r}
+fit_simple_poisson <- glm(Residents.Confirmed.F ~ Date:Name + Percent_Occupied  ,data = Prison , family="poisson")
+```
+
+```{r}
+sum1 <- summary(fit_simple_poisson)
+sum1 
+```
+This chi squared significance test finds the model to fit very well, so we can say case counts change significantly over time for each prison
+
+```{r}
+pchisq(q = deviance(fit_simple_poisson), df =733, lower.tail = F)
+```
+
+Now I'm including occupancy 
+
+```{r}
+fit_simple_poisson2 <- glm(Residents.Confirmed.F ~ Date:Name + Percent_Occupied + Capacity  ,data = Prison , family="poisson")
+summary(fit_simple_poisson2)
+```
+
+```{r}
+pchisq(q = deviance(fit_simple_poisson), df =733, lower.tail = F)
+```
+
+
+# Bayesian Modeling  
+
+Because the 390 day model with 33 prisons took over 48 hours to calculate, I will reduce the number of prisons and the time period to just the SECOND wave of the virus. 
+
+```{r}
+qplot(Prison$Date, Prison$Residents.Confirmed_DailyChange) + 
+  geom_vline(xintercept= unlist(date_start)) + theme_light()+
+  geom_vline(xintercept= unlist(date_start)+56) + labs(y = "Daily Change in Cases", x = "Date")
+```
+
+Based on John's Hopkins (https://www.hopkinsmedicine.org/health/conditions-and-diseases/coronavirus/how-rates-produce-data-spikes), I will begin 8 weeks before the second peak of daily change. The global max in daily change occurred 2020-11-29, so I will filter for dates after 2020-10-04, which is 8 weeks (or 56 days) before November 29. 
+
+```{r}
+Prison.Train <- Prison %>% filter(Date <= "2020-12-30")
+range(Prison.Train$Date)
+# 8 weeks before  date of maximum daily change
+date_start <- Prison.Train[which(Prison.Train$Residents.Confirmed_DailyChange == max(Prison.Train$Residents.Confirmed_DailyChange)), 'Date'] - (8*7)
+date_start
+
+Prison.Train <- Prison.Train %>% filter(Date >= unlist(date_start))
+Prison.Train$Gender <- as.factor(Prison.Train$Gender)
+```
+
+
+Next, I will reduce the number of prisons by randomly selecting 15 from the 33. 
+
+Make sure the random selection process does NOT include the following prisons due to early missing data:
+> CA medical facility
+> Central CA Women's Facility
+> Folsom State Prison
+
+```{r}
+# only run if you want to reduce number of prisons
+set.seed(1)
+all_prisons <- unique(Prison$Name)
+all_prisons <- all_prisons[all_prisons != "CENTRAL CALIFORNIA WOMENS FACILITY" & all_prisons !=  "CALIFORNIA MEDICAL FACILITY" & all_prisons != "FOLSOM STATE PRISON"]
+
+select_prison <- all_prisons[sample(1:length(all_prisons), size = 15, replace = F)]
+
+Prison.Train <- Prison.Train %>% filter(Name %in% select_prison)
+```
+
+Looking at daily change now that prisons and observations have been reduced 
+
+```{r}
+qplot(Prison.Train$Date, Prison.Train$Residents.Confirmed_DailyChange, color = Prison.Train$Name, geom = "line") 
+  # include below to remove legend
+  # + theme(legend.position = "None")
+```
+
+Note that data was not collected in equally-spaced units 
+
+```{r}
+spaced_dates <- unique(Prison$Date)[-1] - unique(Prison$Date)[-288]
+spaced_dates
+date_num <- c(1, cumsum(as.numeric(spaced_dates)) + 1) 
+date_num
+```
+
+
+## Fitting the model - Poisson
+
+
+### 1. Cumulative Cases - simple intercept model 
+
+
+```{r}
+fit_cum_simple <- stan_glmer(formula = Residents.Confirmed.F ~ 1 + (1 | Name), 
+                         data = Prison.Train, family = "poisson")
+```
+
+```{r}
+sum_cum1 <- summary(fit_cum_simple)
+sum_cum1
+```
+
+
+
+### 2. Cumulative Cases - add in Date
+
+```{r}
+fit_cum2 <- stan_glmer(formula = Residents.Confirmed.F ~ Date + (1 | Name), 
+                       family = "poisson",
+                         data = Prison.Train)
+```
+
+```{r}
+summary(fit_cum2)
+```
+
+
+
+```{r}
+plot(fit_cum2)
+plot(fit_cum2, reg = "b")
+```
+
+```{r}
+plot(fit_cum2, plotfun = "trace", pars = c("(Intercept)","Date"))
+```
+
+```{r}
+plot(fit_cum2, plotfun = "dens", pars = c("(Intercept)","Date"))
+```
+
+```{r}
+coef <- as.matrix(coef(fit_cum2)$Name)
+coef
+```
+What does it mean that all the Date values are the same? ^^^
+
+computing curves (not really working rn)
+
+```{r, include = F}
+curves <- as.matrix(cbind(1,Prison.Train["Name"])) %*% t(as.matrix((coef)))
+
+
+qplot(x= curves[,2], geom = "density")+geom_density(color="green") + # "CALIFORNIA CORRECTIONAL INSTITUTION"
+  geom_density(aes(x = curves[,3]), color = "blue") + # "CALIFORNIA HEALTH CARE FACILITY" 
+  geom_density(aes(x = curves[,4]), color = "darkgreen") + #  "CALIFORNIA INSTITUTION FOR MEN"    
+  geom_density(aes(x = curves[,5]), color = "yellow") + # "CALIFORNIA MEDICAL FACILITY"     
+  geom_density(aes(x = curves[,6]), color = "chartreuse") + #"CALIFORNIA STATE PRISON CORCORAN"
+  geom_density(aes(x = curves[,7]), color = "orange") + # "CALIFORNIA STATE PRISON SACRAMENTO" 
+  geom_density(aes(x = curves[,8]), color = "purple")+ # "CALIFORNIA STATE PRISON SOLANO" 
+  geom_density(aes(x = curves[,9]), color = "deeppink3")+ #"CENTRAL CALIFORNIA WOMENS FACILITY" 
+  geom_density(aes(x = curves[,10]), color = "black") #"CORRECTIONAL TRAINING FACILITY"   
+
+```
+
+
+
+
+### 3. Cumulative Cases - Adding Capacity as a variable
+
+
+```{r}
+fit_cum3 <-  stan_glmer(formula = Residents.Confirmed.F ~ Date + Capacity + (1 | Name), 
+                        family = "poisson",
+                         data = Prison.Train)
+```
+
+```{r}
+summary(fit_cum3)
+```
+
+
+```{r}
+plot(fit_cum3, reg = "b")
+```
+
+Capacity is NOT significant --> larger prisons do not have worse cumulative covid case counts, all else constant 
+
+```{r}
+plot(fit_cum3, plotfun = "dens", pars = c("(Intercept)","Date", "Capacity"))
+```
+
+### 4. Cumulative Cases - adding perc_occupied 
+
+
+```{r}
+fit_cum4 <-  stan_glmer(formula = Residents.Confirmed.F ~ Date + Capacity + Percent_Occupied + (1 | Name), 
+                        family = "poisson",
+                         data = Prison.Train)
+```
+
+
+
+```{r}
+summary(fit_cum4)
+```
+
+```{r}
+plot(fit_cum4, reg = "b")
+```
+
+Percent occupied also very significant 
+
+```{r}
+plot(fit_cum4, plotfun = "dens", pars = c("(Intercept)","Date", "Capacity", "Percent_Occupied"))
+```
+
+
+```{r}
+summary(fit_cum4, digits = 4)
+```
+
+
+### 5. Cumulative Cases - add race & staffed capacity rate 
+
+```{r}
+fit_cum5 <-  stan_glmer(formula = Residents.Confirmed.F ~ Date + Percent_Occupied + Staffed_Capacity + 
+                          white_prison_adm_rate.F + (1 | Name), family = "poisson",
+                         data = Prison.Train)
+```
+
+```{r}
+sum_fit5 <- summary(fit_cum5, digits = 4)
+sum_fit5
+```
+
+```{r}
+plot(fit_cum5, plotfun = "dens", pars = c("Date",
+                        "Percent_Occupied","Staffed_Capacity" ,
+                        "white_prison_adm_rate.F")) + 
+  labs(title = c("Date", "Percent Occupied", "Staffed Capacity", "White Prison ADM Rate"))
+# ggsave("fit_cum5_plot1.png")
+plot(fit_cum5,  pars = c("Date",
+                        "Percent_Occupied","Staffed_Capacity" ,
+                        "white_prison_adm_rate.F"))
+# ggsave("fit_cum5_plot2.png")
+
+```
+```{r}
+coef(fit_cum5)
+```
+
+
+### 6. Cumulative Cases - removing race
+
+
+```{r}
+fit_cum6 <-  stan_glmer(formula = Residents.Confirmed.F ~ Date + Percent_Occupied + Staffed_Capacity + (1 | Name), 
+                        family = "poisson",
+                         data = Prison.Train) 
+rstanarm::prior_summary(fit_cum6)
+```
+
+
+
+```{r}
+sum_fit6 <- summary(fit_cum6, digits = 5)
+sum_fit6
+```
+
+
+```{r}
+plot(fit_cum6, plotfun = "dens", pars = c("Date",
+                        "Percent_Occupied","Staffed_Capacity"
+                        ))
+ggsave("fit_cum6_plot1.png")
+```
+
+### 7. Cumulative Cases - including all race vars  
+
+trying with male_prison_adm_rate & female_prison_adm_rate where missing values were filled using the most recent observation in time
+
+```{r}
+fit_cum7 <-  stan_glmer(formula = Residents.Confirmed.F ~ Date + Percent_Occupied  + Staffed_Capacity + 
+                          white_prison_adm_rate + male_prison_adm_rate.F + female_prison_adm_rate.F + (1|Name), 
+                        family = "poisson", 
+                        control = list(max_treedepth = 15),
+                         data = Prison.Train)
+```
+
+
+```{r}
+sum_fit7 <-  summary(fit_cum7, digits = 5)
+```
+
+```{r}
+plot(fit_cum7, plotfun = "dens", pars = c("Date",
+                        "Percent_Occupied","Staffed_Capacity", "white_prison_adm_rate",
+                        "male_prison_adm_rate.F", "female_prison_adm_rate.F"
+                        ))
+# ggsave("fit_cum7_plot1.png")
+plot(fit_cum7,  pars = c("Date",
+                        "Percent_Occupied","Staffed_Capacity", "white_prison_adm_rate",
+                        "male_prison_adm_rate.F", "female_prison_adm_rate.F"
+                        ))
+# ggsave("fit_cum7_plot2.png")
+```
+
+## Fitting the model - Gaussian
+
+
+### 1. Cumulative Cases - simple intercept model 
+
+
+```{r}
+Gfit_cum_simple <- stan_glmer(formula = Residents.Confirmed.F ~ 1 + (1 | Name), 
+                         data = Prison.Train)
+```
+
+```{r}
+Gsum_cum1 <- summary(Gfit_cum_simple)
+Gsum_cum1
+```
+
+```{r}
+Gfit_cum_simple$call
+```
+
+
+
+
+### 2. Cumulative Cases - add in Date
+
+```{r}
+Gfit_cum2 <- stan_glmer(formula = Residents.Confirmed.F ~ Date + (1 | Name),
+                         data = Prison.Train)
+```
+
+```{r}
+summary(Gfit_cum2)
+```
+
+
+```{r}
+plot(Gfit_cum2, reg = "b")
+```
+
+```{r}
+plot(Gfit_cum2, plotfun = "trace", pars = c("(Intercept)","Date"))
+```
+
+```{r}
+plot(Gfit_cum2, plotfun = "dens", pars = c("(Intercept)","Date"))
+```
+
+```{r}
+coef <- as.matrix(coef(Gfit_cum2)$Name)
+coef
+```
+
+
+
+
+### 3. Cumulative Cases - Adding Capacity as a variable
+
+
+```{r}
+Gfit_cum3 <-  stan_glmer(formula = Residents.Confirmed.F ~ Date + Capacity + (1 | Name), 
+                         data = Prison.Train)
+```
+
+```{r}
+summary(Gfit_cum3)
+```
+
+
+```{r}
+plot(Gfit_cum3, reg = "b")
+```
+
+```{r}
+plot(Gfit_cum3, plotfun = "dens", pars = c("(Intercept)","Date", "Capacity"))
+```
+
+### 4. Cumulative Cases - adding perc_occupied 
+
+
+```{r}
+Gfit_cum4 <-  stan_glmer(formula = Residents.Confirmed.F ~ Date + Capacity + Percent_Occupied + (1 | Name), 
+                         data = Prison.Train)
+```
+
+
+
+```{r}
+summary(Gfit_cum4, digits = 4)
+```
+
+```{r}
+plot(Gfit_cum4, reg = "b")
+```
+
+Percent occupied also very significant 
+
+```{r}
+plot(Gfit_cum4, plotfun = "dens", pars = c("(Intercept)","Date", "Capacity", "Percent_Occupied"))
+```
+
+### 5. Cumulative Cases - add race & staffed capacity rate 
+
+```{r}
+Gfit_cum5 <-  stan_glmer(formula = Residents.Confirmed.F ~ Date + Percent_Occupied + Staffed_Capacity + 
+                          white_prison_adm_rate.F + (1 | Name), 
+                         data = Prison.Train)
+```
+
+```{r}
+sum_gfit5 <- summary(Gfit_cum5, digits = 4)
+sum_gfit5
+```
+
+```{r}
+plot(Gfit_cum5, plotfun = "dens", pars = c("Date",
+                        "Percent_Occupied","Staffed_Capacity" ,
+                        "white_prison_adm_rate.F"))
+# ggsave("Gfit_cum5_plot1.png")
+plot(Gfit_cum5, pars = c("Date",
+                        "Percent_Occupied","Staffed_Capacity" ,
+                        "white_prison_adm_rate.F"))
+# ggsave("Gfit_cum5_plot2.png")
+```
+
+
+
+### 6. Cumulative Cases - removing race
+
+
+```{r}
+Gfit_cum6 <-  stan_glmer(formula = Residents.Confirmed.F ~ Date + Percent_Occupied + 
+                          Staffed_Capacity + (1 | Name), 
+                         data = Prison.Train) 
+```
+
+
+```{r}
+Gsum_fit6 <- summary(Gfit_cum6, digits = 4)
+Gsum_fit6
+```
+
+```{r}
+plot(Gfit_cum6, plotfun = "dens", pars = c("Date","Percent_Occupied","Staffed_Capacity" ))
+# ggsave("Gfit_cum6_plot1.png")
+plot(Gfit_cum6,  pars = c("Date","Percent_Occupied","Staffed_Capacity" ))
+# ggsave("Gfit_cum6_plot2.png")
+
+```
+
+### 7. Cumulative Cases - all race vars 
+
+
+```{r}
+Gfit_cum7 <-  stan_glmer(formula = Residents.Confirmed.F ~ Date + Percent_Occupied + Staffed_Capacity + 
+                          white_prison_adm_rate + male_prison_adm_rate.F + female_prison_adm_rate.F + (1|Name), 
+                         data = Prison.Train)
+
+```
+
+```{r}
+sum_Gfit7 <- summary(Gfit_cum7)
+sum_Gfit7
+```
+
+```{r}
+plot(Gfit_cum7, plotfun = "dens", pars = c("Date",
+                        "Percent_Occupied","Staffed_Capacity", "white_prison_adm_rate",
+                        "male_prison_adm_rate.F", "female_prison_adm_rate.F"
+                        ))
+# ggsave("Gfit_cum7_plot1.png")
+plot(Gfit_cum7,  pars = c("Date",
+                        "Percent_Occupied","Staffed_Capacity", "white_prison_adm_rate",
+                        "male_prison_adm_rate.F", "female_prison_adm_rate.F"
+                        ))
+# ggsave("Gfit_cum7_plot2.png")
+
+```
+
+
+```{r}
+sum_fit7 <- summary(Gfit_cum7)
+(as.character(sum_fit7$call[,2]))
+```
+
+
+## Running Multiple Mods 
+
+```{r}
+Gfit_cum7 <-  stan_glmer(formula = Residents.Confirmed.F ~ Date + Percent_Occupied + Staffed_Capacity + 
+                          white_prison_adm_rate + male_prison_adm_rate.F + female_prison_adm_rate.F + (1|Name), 
+                         data = Prison.Train)
+Gfit_cum6 <-  stan_glmer(formula = Residents.Confirmed.F ~ Date + Percent_Occupied + 
+                          Staffed_Capacity + (1 | Name), family = "poisson", 
+                         data = Prison.Train) 
+
+```
+
+
+## Comparing Bayesian Models
+
+## Posterior predictive fit
+
+I will start by comparing the posterior predictive fit to determine best fitting distribution
+
+```{r}
+yrep5_poisson <- posterior_predict(fit_cum5, draws = 500)
+yrep6_poisson <- posterior_predict(fit_cum6, draws = 500)
+yrep7_poisson <- posterior_predict(fit_cum7, draws = 500)
+
+yrep5_gaussian <- posterior_predict(Gfit_cum5, draws = 500)
+yrep6_gaussian <- posterior_predict(Gfit_cum6, draws = 500)
+yrep7_gaussian <- posterior_predict(Gfit_cum7, draws = 500)
+```
+
+```{r}
+ppc_dens_overlay(Prison.Train$Residents.Confirmed.F, yrep5_poisson[1:50, ])
+# ggsave("fit_cum5_plot3.png")
+ppc_dens_overlay(Prison.Train$Residents.Confirmed.F, yrep6_poisson[1:50, ])
+# ggsave("fit_cum6_plot3.png")
+ppc_dens_overlay(Prison.Train$Residents.Confirmed.F, yrep7_poisson[1:50, ])
+# ggsave("fit_cum7_plot3.png")
+
+```
+
+```{r}
+ppc_dens_overlay(Prison.Train$Residents.Confirmed.F, yrep5_gaussian[1:50, ])
+# ggsave("Gfit_cum5_plot3.png")
+ppc_dens_overlay(Prison.Train$Residents.Confirmed.F, yrep6_gaussian[1:50, ])
+# ggsave("Gfit_cum6_plot3.png")
+ppc_dens_overlay(Prison.Train$Residents.Confirmed.F, yrep7_gaussian[1:50, ])
+# ggsave("Gfit_cum7_plot3.png")
+```
+
+All plots agree: poisson is the better fit 
+
+```{r}
+prop_zero <- function(x){ mean(x == 0) }
+prop_zero(Prison.Train$Residents.Confirmed.F)
+```
+
+```{r}
+pp_check(fit_cum5)
+pp_check(fit_cum6)
+pp_check(fit_cum7)
+```
+
+```{r}
+pp_check(Gfit_cum5)
+pp_check(Gfit_cum6)
+pp_check(Gfit_cum7)
+
+fit_cum6$call
+```
+
+## ELPD
+
+Now I will compare ELPD to determine which model is best
+
+```{r}
+loo1 <- loo(fit_cum_simple, cores = 2)
+loo2 <- loo(fit_cum2, cores = 2)
+loo3 <- loo(fit_cum3, cores = 2)
+loo4 <- loo(fit_cum4, cores = 2)
+loo5 <- loo(fit_cum5, cores = 2)
+loo6 <- loo(fit_cum6, cores = 2)
+loo7 <- loo(fit_cum7, cores = 2)
+loo8 <- loo(fit_cum8, cores = 2)
+```
+
+```{r}
+Gloo1 <- loo(Gfit_cum_simple, cores = 2)
+Gloo2 <- loo(Gfit_cum2, cores = 2)
+Gloo3 <- loo(Gfit_cum3, cores = 2)
+Gloo4 <- loo(Gfit_cum4, cores = 2)
+Gloo5 <- loo(Gfit_cum5, cores = 2)
+Gloo6 <- loo(Gfit_cum6, cores = 2)
+Gloo7 <- loo(Gfit_cum7, cores = 2)
+Gloo8 <- loo(Gfit_cum8, cores = 2)
+```
+
+
+```{r}
+ELPD <- tibble(Model = c(4,5,6,7, 8),
+                   ELPD = c(loo4$estimates[1,1], loo5$estimates[1,1], 
+                            loo6$estimates[1,1], loo7$estimates[1,1]))
+
+GELPD <- tibble(Model = c(4,5,6,7, 8),
+                   ELPD = c(Gloo4$estimates[1,1], Gloo5$estimates[1,1], 
+                            Gloo6$estimates[1,1], Gloo7$estimates[1,1]))
+
+```
+
+
+```{r}
+ELPD
+```
+
+```{r}
+GELPD
+```
+
+
+
+None of the models are significantly different 
+
+```{r}
+loo_compare(Gloo5, loo5)
+loo_compare(Gloo6, loo5)
+loo_compare(Gloo7, loo5)
+loo_compare(Gloo8, loo5)
+```
+```{r}
+loo_compare(loo5, loo6)
+loo_compare(loo5, loo7)
+```
+
+
+
+
+
+
+## Including Informative Priors
+
+For future investigation, I will be proceeding with model 6: 
+
+Residents.Confirmed.F ~ Date + Percent_Occupied + Staffed_Capacity + (1 | Name)
+
+### Facility Priors - based on previous modelling
+
+During the first round of modeling, I found patterns among the facilities with significant coefficients. The following facilities were consistently significantly above average:
+
+> Avenal State Prison
+> CA Institution for Women
+> CA State Prison, San Quentin
+> Chuckawalla Valley State Prison
+
+and the following were significantly below average
+
+> Deuel Vocational Institution 
+> Pelican Bay State Prison 
+> Correctional Training Facility
+> CA State Prison, Solano
+
+These patterns offer the chance for informative priors which expect Deuel Vocational Institution,  
+Pelican Bay State Prison, Correctional Training Facility, and CA State Prison, Solano to have very negative coefficients and Avenal State Prison, CA Institution for Women, CA State Prison, San Quentin, and Chuckawalla Valley State Prison to have very positive coefficients. 
+
+Where $\lambda = e^{\beta_i' x}$ for the poisson distribution, very negative coefficients correspond to lambdas like 
+
+
+### Capacity Priors 
+
+An additional prior would be from Robertson (2021)  (https://www.ncbi.nlm.nih.gov/pmc/articles/PMC7831623/) who found a one person increase in the average persons per household, increased log cumulative covid case counts by 1.110. 
+
+This could be used as a proxy prior on facility capacity and percent occupied
+
+
+    
+```{r}
+# DO NOT INCLUDE MODEL 
+Pfit_cum6b <-  stan_glmer(formula = Residents.Confirmed.F ~ Date + Percent_Occupied +  
+                          Staffed_Capacity + (1 | Name), 
+                          prior = c(normal(.01, .0001), # date
+                                    normal(1.1, .01), # % occupied
+                                    normal(1.1, .01), # staffed capacity
+                                    normal(2, .5), # Avenal
+                                    normal(0, .5), # CA health
+                                    normal(2, .5), # CA instute for women
+                                    normal(0, .5), # CSP Los Angeles
+                                    normal(2, .5), # CSP San Quentin
+                                    normal(-2, .5), # CSP Solano
+                                    normal(0, .5), # calipatria
+                                    normal(0, .5), # centinela 
+                                    normal(2, .5), # CHUCKAWALLA_VALLEY_STATE_PRISON
+                                    normal(-2, .5), # CORRECTIONAL_TRAINING_FACILITY
+                                    normal(-2, .5), # DEUEL_VOCATIONAL_INSTITUTION
+                                    normal(0, .5), # IRONWOOD_STATE_PRISON
+                                    normal(0, .5), # NORTH_KERN_STATE_PRISON
+                                    normal(-2, .5), # PELICAN_BAY_STATE_PRISON
+                                    normal(0, .5)), # SUBSTANCE_ABUSE_TREATMENT_FACILITY), 
+                          control = list(max_treedepth = 16), 
+                           iter = 2500,
+                        family = "poisson",
+                         data = Prison.Train) 
+
+```
+```{r}
+sum_Pfit6b <- summary(Pfit_cum6b)
+sum_Pfit6b
+```
+
+```{r}
+plot(Pfit_cum6b, reg = "b")
+ggsave("Ffit_cum6b_plot1.png", width = 11)
+plot(Pfit_cum6b, pars = c("Date","Percent_Occupied","Staffed_Capacity"))
+ggsave("Ffit_cum6b_plot2.png")
+```
+
+
+```{r}
+yrep6_priorb <- posterior_predict(Pfit_cum6b, draws = 500)
+ppc_dens_overlay(Prison.Train$Residents.Confirmed.F, yrep6_priorb[1:50,])
+ggsave("Pfit_cum6b_plot3.png")
+```
+The use of these priors made more extreme the problem of Model 6: over-predicting smaller case counts, though small peaks in higher values are present -- just in the wrong places. 
+
+
+
+```{r}
+1.126 - 1.094
+
+(1.126 + 1.094)/2 - 1.126
+
+1.126 - (1.126 + 1.094)/2 = - sd*sqrt(288)
+(1.126 - (1.126 + 1.094)/2 ) / sqrt(288) = - sd
+```
+
+
+
+
+
+
+### Facility Priors - based on sparcity assumption 
+
+```{r}
+# guess for # of 0 coefficients 
+p0 <- 7
+# Num coefficients
+p <- 18
+# num observations
+n <- nrow(Prison.Train)
+tau0 <- p0 /(p - p0) * 1/sqrt(n )
+hs_prior <- hs(df = 1, global_df = 1, global_scale = tau0)
+```
+
+```{r}
+Sfit_cum6b <-  stan_glmer(formula = Residents.Confirmed.F ~ Date + Percent_Occupied +  
+                          Staffed_Capacity + (1 | Name), 
+                          prior = hs_prior,  
+                          control = list(max_treedepth = 17), 
+                          iter = 2500,
+                        family = "poisson",
+                         data = Prison.Train) 
+```
+
+```{r}
+sum_Sfit6a <- summary(Sfit_cum6a)
+sum_Sfit6a
+```
+
+```{r}
+yrep6_SpriorA <- posterior_predict(Sfit_cum6a, draws = 500)
+ppc_dens_overlay(Prison.Train$Residents.Confirmed.F, yrep6_SpriorA[1:50,]) + xlim(c(0, 1))
+```
+
+
+```{r}
+Sfit_cum6b <-  stan_glmer(formula = Residents.Confirmed.F ~ Date + Percent_Occupied +  
+                          Staffed_Capacity + (1 | Name), 
+                          prior = hs_prior,  
+                          control = list(max_treedepth = 18), 
+                          iter = 2500,
+                        family = "poisson",
+                         data = Prison.Train) 
+
+```
+
+```{r}
+sum_Sfit6b <- summary(Sfit_cum6b, digits = 5)
+sum_Sfit6b
+```
+
+
+### refitting with noninformative prior and fixed effects
+
+```{r}
+fit_cum6b <-  stan_glm(formula = Residents.Confirmed.F ~ Date + Percent_Occupied +  
+                          Staffed_Capacity + Name, 
+                          # prior = hs_prior,  
+                          # control = list(max_treedepth = 18), 
+                          # iter = 2500,
+                        family = "poisson",
+                         data = Prison.Train) 
+```
+
+```{r}
+sum_fit6b <- summary(fit_cum6b, digits = 5)
+sum_fit6b
+```
+
+```{r}
+Sfit_cum6c <-  stan_glm(formula = Residents.Confirmed.F ~ Date + Percent_Occupied +  
+                          Staffed_Capacity + Name, 
+                          prior = hs_prior,
+                          # control = list(max_treedepth = 18), 
+                          # iter = 2500,
+                        family = "poisson",
+                        data = Prison.Train) 
+ 
+```
+
+
+### testing capacity informative prior on the fixed effects model 
+
+```{r}
+fit_cum6c <-  stan_glm(formula = Residents.Confirmed.F ~ Date + Percent_Occupied +  
+                          Staffed_Capacity + Name, 
+                          prior = c(normal(0.01638,0.00011  ), # date
+                                    normal(0.09531018, 2.5), # % occupied
+                                    normal(0.09531018,2.5), # staffed capacity
+                                    normal(0.45835, 0.04973), # CA health
+                                    normal(4.10960,0.05617), # CA instute for women
+                                    normal(-0.36433,0.02063), # CSP Los Angeles
+                                    normal(2.05434,0.03432), # CSP San Quentin
+                                    normal(-3.05848,0.02087 ), # CSP Solano
+                                    normal(-1.74527,0.02729), # calipatria
+                                    normal(-1.86813,0.03292 ), # centinela 
+                                    normal(  2.73484,0.03012), #  CHUCKAWALLA VALLEY 
+                                    normal(-2.61341,0.01787 ), # CORRECTIONAL TRAINING FACILITY
+                                    normal( 0.20691,0.05649), # DEUEL VOCATIONAL INSTITUTION
+                                    normal(-1.61230,0.02928), # IRONWOOD_STATE_PRISON
+                                    normal(-0.35540,0.02924 ), # NORTH_KERN_STATE_PRISON
+                                    normal(-0.92073,0.03653  ), # PELICAN_BAY_STATE_PRISON
+                                    normal(-2.10892,0.01493)),#SUBSTANCE ABUSE TREATMENT FACILITY), 
+                       iter = 3000,  
+                       family = "poisson",
+                        data = Prison.Train) 
+prior_summary(fit_cum6c)
+sum_fit6c <- summary(fit_cum6c, digits = 5)
+sum_fit6c
+```
+
+
+
+
+### Comparing informative priors models
+
+#### posterior predictive checks
+
+```{r}
+yrep6b_poisson <- posterior_predict(fit_cum6b, draws = 500)
+ppc_dens_overlay(Prison.Train$Residents.Confirmed.F, yrep6b_poisson[1:50,]) 
+# ggsave("fit_cum6b_plot3.png")
+```
+
+```{r}
+yrep6_SpriorB <- posterior_predict(Sfit_cum6b, draws = 500)
+ppc_dens_overlay(Prison.Train$Residents.Confirmed.F, yrep6_SpriorB[1:50,]) + xlim(c(0, 1))
+# ggsave("Sfit_cum6b_plot3.png")
+```
+
+From the posterior prediction plots we can see the first informative prior performs very poorly 
+
+```{r}
+yrep6c_fixedeff_prior <- posterior_predict(fit_cum6c, draws = 500)
+ppc_dens_overlay(Prison.Train$Residents.Confirmed.F, yrep6c_fixedeff_prior[1:50,]) # + xlim(c(0, 1))
+# ggsave("fit_cum6c_plot3.png")
+```
+
+
+#### ELPD
+
+```{r}
+ELPD2 <- tibble(Model = rep(" ",3),
+                ELPD = rep(0,3))
+```
+
+```{r}
+loo6b <- loo(fit_cum6b, cores = 2)
+loo6c <- loo(fit_cum6c, cores = 2)
+Sloo6b <- loo(Sfit_cum6b, cores = 2)
+
+ELPD2[1,1] <- as.character(fit_cum6b$call[2])
+ELPD2[1,2] <- loo6b$estimates[1,1]
+ELPD2[2,1] <- as.character(Sfit_cum6b$call[2])
+ELPD2[2,2] <- Sloo6b$estimates[1,1]
+ELPD2[3,1] <- as.character(fit_cum6$call[2])
+ELPD2[3,2] <- loo6$estimates[1,1]
+ELPD2[4,1] <- as.character(fit_cum6c$call[2])
+ELPD2[4,2] <- loo6c$estimates[1,1]
+ELPD2
+```
+
+The informative prior on the mixed effects model again has by far the worst ELPD. The fixed effects model performs much better, but when compared to the mixed effects model with noniformative prior, the ELPDs are again too close to differentiate

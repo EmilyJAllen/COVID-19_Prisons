@@ -1,0 +1,218 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(plotly)
+```
+
+```{r}
+hist(PrisonCovid.inner$Residents.Confirmed)
+```
+
+
+```{r}
+qplot(PrisonCovid.inner$Percent_Occupied, PrisonCovid.inner$Residents.Deaths, color = PrisonCovid.inner$Name) + theme_light()+ theme(legend.position = "NA") 
+```
+
+```{r}
+qplot(PrisonCovid.inner$Design_Capacity, PrisonCovid.inner$Residents.Deaths, color = PrisonCovid.inner$Name) + theme_light()+ theme(legend.position = "NA") 
+```
+
+```{r}
+qplot(PrisonCovid.inner$Week, PrisonCovid.inner$Residents.Confirmed, color = PrisonCovid.inner$Name) + theme_light()+ theme(legend.position = "NA") 
+```
+```{r}
+qplot(PrisonCovid.inner$Week, PrisonCovid.inner$Residents.Confirmed_DailyChange, color = PrisonCovid.inner$Name) + theme_light()+ theme(legend.position = "NA") 
+```
+
+```{r}
+ggplot(data = Prison , aes(Date, Residents.Confirmed.F)) + geom_line(aes(group = Name, color = Capacity)) + 
+  theme_light() + theme(legend.position = "NA") 
+```
+
+# Fitting Poisson visually
+
+Can we fit a poisson distribution for each facility?
+
+```{r}
+ggplot(data = PrisonCovid.inner %>% filter(Name == "FOLSOM STATE PRISON"), aes(Week, Residents.Confirmed))+ geom_point() +
+  theme_light()+ theme(legend.position = "NA")
+```
+What poisson fits this?
+
+```{r}
+x <- c(1:57)
+pmf <- dpois(x, lambda = 20)
+cdf <- c(pmf[1],rep(0,length(pmf)-1))
+for (i in 2:length(cdf)){
+  cdf[i] <- cdf[i-1] + pmf[i]
+}
+
+plot(x, cdf)
+```
+
+
+
+```{r}
+qplot(PrisonCovid.inner$Week, PrisonCovid.inner$Residents.Deaths, color = PrisonCovid.inner$Name) + theme_light()+ theme(legend.position = "NA") 
+```
+
+```{r}
+qplot(PrisonCovid.inner$Design_Capacity, PrisonCovid.inner$Residents.Confirmed, color = PrisonCovid.inner$Name) + theme_light()+ theme(legend.position = "NA") 
+```
+
+
+
+
+```{r}
+#### BSCC_County ####
+ggplot(data = BSCC_county %>% filter(str_detect(County, "San")), aes(Date, `(ADP totals) Jurisdiction`)) + 
+  geom_point(aes(color= County))
+# ggsave("Plots/BSCCcounty_ADPtotals_scatter.png")
+```
+
+
+```{r}
+#### CovidBSCC.Merged ####
+qplot( CovidBSCC.Merged$Date, CovidBSCC.Merged$`(ADP totals) Jurisdiction`)
+```
+
+```{r}
+qplot(CovidBSCC.Merged$Date, CovidBSCC.Merged$CaseRate_Residents, color = CovidBSCC.Merged$County)
+```
+
+
+```{r}
+##### CA Covid ####
+qplot(data = CACovid, x = date, y = cases, color = as.factor(area))
+```
+
+
+# Moving Plots
+
+
+```{r}
+
+fig <- plot_ly(
+  type = "scatter",
+  x = PrisonCovid.inner$Date, 
+  y = PrisonCovid.inner$Residents.Confirmed.F,
+  color = as.factor(PrisonCovid.inner$Name),
+  name = 'resident cases',
+  mode = "markers",
+)
+fig <- fig %>%
+  layout(
+    title = "Time Series with Custom Date-Time Format",
+    xaxis = list(
+      type = "date",
+      range=c('2020-03-01', '2021-04-01')
+    )
+  )
+fig
+```
+
+```{r}
+df <- PrisonCovid.inner 
+fig <- df %>%
+  plot_ly(
+    x = ~Date, 
+    y = ~Residents.Confirmed.F, 
+    size = ~as.integer(Capacity), 
+    color = ~Name, 
+    frame = ~as.integer(Capacity), 
+    text = ~Name, 
+    hoverinfo = "text",
+    type = 'scatter',
+    mode = 'markers'
+  )
+fig
+```
+
+
+
+```{r}
+accumulate_by <- function(dat, var) {
+  var <- lazyeval::f_eval(var, dat)
+  lvls <- plotly:::getLevels(var)
+  dats <- lapply(seq_along(lvls), function(x) {
+    cbind(dat[var %in% lvls[seq(1, x)], ], frame = lvls[[x]])
+  })
+  dplyr::bind_rows(dats)
+}
+
+df <- PrisonCovid.inner 
+fig <- df %>%
+  filter(Date > "2020-10-04", Name %in% c("AVENAL STATE PRISON", "NORTH KERN STATE PRISON" ,
+                                          "CALIFORNIA INSTITUTION FOR MEN" , 
+                                          "PLEASANT VALLEY STATE PRISON" ))
+# fig <- fig %>% accumulate_by(~Date)
+
+
+fig <- fig %>%
+  plot_ly(
+    x = ~Date, 
+    y = ~Residents.Confirmed.F,
+    split = ~Name,
+    frame = ~frame, 
+    type = 'scatter',
+    mode = 'lines', 
+    line = list(simplyfy = F)
+  )
+fig <- fig %>% layout(
+  xaxis = list(
+    title = "Date",
+    zeroline = F
+  ),
+  yaxis = list(
+    title = "Median",
+    zeroline = F
+  )
+) 
+fig <- fig %>% animation_opts(
+  frame = 100, 
+  transition = 0, 
+  redraw = FALSE
+)
+fig <- fig %>% animation_slider(
+  hide = T
+)
+fig <- fig %>% animation_button(
+  x = 1, xanchor = "right", y = 0, yanchor = "bottom"
+)
+
+fig
+```
+
+```{r}
+qplot(Prison.Train$Percent_Occupied, Prison.Train$Residents.Confirmed.F, color = Prison.Train$Name) + theme_light() + theme(legend.position = "None") +
+  labs(x = "Percent Occupied", y = "Resident Cumulative Case Count")
+ggsave("Plots/PercentOccupied_PrisonTrain.png")
+qplot(Prison$Percent_Occupied, Prison$Residents.Confirmed.F, color = Prison$Name)
+ggsave("Plots/FullData_LEGEND.png")
+```
+
+```{r}
+GB <- Prison.Train %>% group_by(Name) %>% summarise(Name,
+                                                    Percent_Occupied = mean(Percent_Occupied),
+                                                    Residents.Confirmed.F = mean(Residents.Confirmed.F))
+```
+
+```{r}
+qplot(GB$Percent_Occupied, GB$Residents.Confirmed.F, color = GB$Name)+
+  labs(x = "Percent Occupied", y = "Resident Cumulative Case Count") + 
+  theme_light() + 
+  theme(legend.position = "None")
+ggsave("Plots/PercentOccupied_means_PrisonTrain.png")
+```
+
+```{r}
+qplot(Prison.Train$Percent_Occupied, Prison.Train$Residents.Confirmed.F, color = Prison.Train$Name) + theme_light() + #theme(legend.position = "None") +
+  labs(x = "Percent Occupied", y = "Resident Cumulative Case Count")
+ggsave("Plots/PercentOccupied_PrisonTrain_LEGEND.png", height = 5, width = 7)
+```
+
