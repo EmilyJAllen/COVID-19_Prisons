@@ -23,7 +23,8 @@ Predictors include:
 
 ## Code:
 * Modelling.Rmd = all frequentist and bayesian regression models for predicting case frequencies as well as comparisons and analysis of performance 
-* Visualizations.RM = a collection of graphs and visualizations used in the reports and presentation
+* Visualizations.Rmd = a collection of graphs and visualizations used in the reports and presentation
+* Data_Cleaning.R = script used to merge various datasets into final data used in Modelling.Rmd and Visualizations.Rmd
 
 ## Documents:
 * Final_Presentation.pdf = slides from the final presentation delivered in June 2021
